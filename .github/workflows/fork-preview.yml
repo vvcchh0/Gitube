@@ -1,0 +1,361 @@
+# Fork-only preview. Never run or publish from the upstream repository.
+# Push the preview branch, not the tag: GITHUB_TOKEN creates the tag below so
+# the original release.yml tag trigger does not start a separate release.
+name: Fork recommendation controls preview
+
+on:
+  push:
+    branches: [codex/preview-recommendation-controls]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-preview-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PREVIEW_VERSION: 0.3.0-preview.1
+  PREVIEW_TAG: v0.3.0-preview.1
+  CONTRIBUTION_SHA: d16239b79fbcb44e7b7b40f48b78f0b5b9944c2f
+
+jobs:
+  prepare:
+    if: github.repository == 'vvcchh0/Gitube' && github.ref == 'refs/heads/codex/preview-recommendation-controls'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.release.outputs.source_sha }}
+      release_id: ${{ steps.release.outputs.release_id }}
+      release_url: ${{ steps.release.outputs.release_url }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Verify source ancestry and every application version
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git merge-base --is-ancestor "$CONTRIBUTION_SHA" HEAD
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const json = file => JSON.parse(fs.readFileSync(file, 'utf8'));
+          const version = process.env.PREVIEW_VERSION;
+          const pkg = json('package.json');
+          const lock = json('package-lock.json');
+          const tauri = json('src-tauri/tauri.conf.json');
+          const cargo = fs.readFileSync('src-tauri/Cargo.toml', 'utf8').match(/\[package\][\s\S]*?^version = "([^"]+)"/m)?.[1];
+          const cargoLock = fs.readFileSync('src-tauri/Cargo.lock', 'utf8').match(/\[\[package\]\]\s*name = "gitube"\s*version = "([^"]+)"/)?.[1];
+          const versions = [pkg.version, lock.version, lock.packages[''].version, tauri.version, cargo, cargoLock];
+          if (versions.some(value => value !== version)) throw new Error(`Version mismatch: ${versions}`);
+          if (process.env.PREVIEW_TAG !== `v${version}`) throw new Error('Tag/version mismatch');
+          if (tauri.bundle.windows?.wix?.version !== '0.3.0.1') throw new Error('Expected numeric MSI version 0.3.0.1');
+          NODE
+
+      - name: Create or resume one unpublished prerelease at the exact source SHA
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$PREVIEW_TAG" >/dev/null 2>&1; then
+            tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$PREVIEW_TAG" --jq .sha)
+            test "$tag_sha" = "$GITHUB_SHA" || { echo 'Tag already points to a different source SHA; choose a new preview version.' >&2; exit 1; }
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$PREVIEW_TAG" -f "sha=$GITHUB_SHA" >/dev/null
+          fi
+
+          if ! gh release view "$PREVIEW_TAG" --repo "$GITHUB_REPOSITORY" --json databaseId > release-id.json 2>/dev/null; then
+            cat > release-notes.md <<EOF
+          Fork preview of the recommendation controls contribution: per-person following weights, foreground reading signals, and normal / explore / random recommendation modes with session feed resume.
+
+          - Source commit: $GITHUB_SHA
+          - Accepted contribution: $CONTRIBUTION_SHA
+          - Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          - Web preview: https://vvcchh0.github.io/Gitube/
+          - Source and web archives include SHA-256 checksums and build metadata.
+
+          Validation before this preview: 40 local automated tests and isolated browser checks passed. This workflow runs npm ci, npm test, npm run build, Pages deployment, and macOS ARM / macOS Intel / Windows / Linux native bundles at the source SHA above. The release is published only after all these jobs succeed and the web/source archive checksums are verified.
+
+          Manual acceptance: try all three recommendation modes and return to each feed; adjust one following weight to 0 and restore it; confirm reading only counts while the detail page is visible and focused; inspect responsive light/dark views. A real GitHub account flow and local native installation have not yet been tested. These are unsigned preview installers; the source project remains serverless and stores login/recommendation data on the user's device.
+          EOF
+            gh release create "$PREVIEW_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --target "$GITHUB_SHA" --draft --prerelease --title "Gitube $PREVIEW_TAG (fork preview)" --notes-file release-notes.md
+            gh release view "$PREVIEW_TAG" --repo "$GITHUB_REPOSITORY" --json databaseId > release-id.json
+          fi
+          release_id=$(node -p "JSON.parse(require('fs').readFileSync('release-id.json','utf8')).databaseId")
+          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" > release.json
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const release = JSON.parse(fs.readFileSync('release.json', 'utf8'));
+          if (!release.draft || !release.prerelease || release.tag_name !== process.env.PREVIEW_TAG || release.target_commitish !== process.env.GITHUB_SHA) {
+            throw new Error('Refusing to overwrite a published release or a draft belonging to another source SHA');
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `source_sha=${process.env.GITHUB_SHA}\nrelease_id=${release.id}\nrelease_url=${release.html_url}\n`);
+          NODE
+
+  web:
+    if: github.repository == 'vvcchh0/Gitube' && github.ref == 'refs/heads/codex/preview-recommendation-controls'
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install, test, and build the exact preview source
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      - name: Package web preview and immutable source with checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          mkdir -p release-assets
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const metadata = {
+            repository: process.env.GITHUB_REPOSITORY,
+            sourceSha: process.env.GITHUB_SHA,
+            contributionSha: process.env.CONTRIBUTION_SHA,
+            ref: process.env.GITHUB_REF,
+            version: process.env.PREVIEW_VERSION,
+            tag: process.env.PREVIEW_TAG,
+            runUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+            runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+          };
+          const text = JSON.stringify(metadata, null, 2) + '\n';
+          fs.writeFileSync('release-assets/build-metadata.json', text);
+          fs.writeFileSync('dist/preview-source.json', text);
+          NODE
+          prefix="Gitube-${PREVIEW_VERSION}-${GITHUB_SHA:0:12}"
+          assets="$PWD/release-assets"
+          git archive --format=zip --prefix="${prefix}/" "$GITHUB_SHA" -o "$assets/${prefix}-source.zip"
+          (cd dist && zip -qr "$assets/${prefix}-web.zip" .)
+          (cd release-assets && sha256sum *.zip build-metadata.json > SHA256SUMS)
+
+      - name: Upload archives to the draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/${{ needs.prepare.outputs.release_id }}" --jq '.draft and .prerelease' | grep -qx true
+          gh release upload "$PREVIEW_TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    if: github.repository == 'vvcchh0/Gitube' && github.ref == 'refs/heads/codex/preview-recommendation-controls'
+    needs: [prepare, web]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+
+      - name: Deploy the tested web preview
+        id: deployment
+        uses: actions/deploy-pages@v5
+
+  desktop:
+    if: github.repository == 'vvcchh0/Gitube' && github.ref == 'refs/heads/codex/preview-recommendation-controls'
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+          - platform: macos-latest
+            args: --target x86_64-apple-darwin
+          - platform: windows-latest
+            args: ''
+          - platform: ubuntu-22.04
+            args: ''
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+
+      - name: Install Linux bundle dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and upload to the shared draft prerelease
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          tagName: v0.3.0-preview.1
+          releaseName: Gitube v0.3.0-preview.1 (fork preview)
+          releaseDraft: true
+          prerelease: true
+          args: ${{ matrix.args }}
+
+  finalize:
+    if: ${{ always() && github.repository == 'vvcchh0/Gitube' && github.ref == 'refs/heads/codex/preview-recommendation-controls' }}
+    needs: [prepare, web, deploy, desktop]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+      PAGE_URL: ${{ needs.deploy.outputs.page_url }}
+      JOB_RESULTS: ${{ toJSON(needs) }}
+    steps:
+      - name: Require every job, every desktop platform, and every expected asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          const results = JSON.parse(process.env.JOB_RESULTS);
+          for (const [job, data] of Object.entries(results)) {
+            if (data.result !== 'success') throw new Error(`${job}: ${data.result}; keeping the prerelease draft`);
+          }
+          if (results.prepare.outputs.source_sha !== process.env.GITHUB_SHA) throw new Error('Source SHA mismatch');
+          if (!process.env.PAGE_URL) throw new Error('Missing successful Pages deployment URL');
+          NODE
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$PREVIEW_TAG" --jq .sha)" = "$GITHUB_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > release.json
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const release = JSON.parse(fs.readFileSync('release.json', 'utf8'));
+          if (!release.draft || !release.prerelease || release.target_commitish !== process.env.GITHUB_SHA) throw new Error('Release state/source mismatch');
+          const assets = release.assets;
+          const names = assets.map(asset => asset.name);
+          const prefix = `Gitube-${process.env.PREVIEW_VERSION}-${process.env.GITHUB_SHA.slice(0, 12)}`;
+          for (const name of [`${prefix}-web.zip`, `${prefix}-source.zip`, 'build-metadata.json', 'SHA256SUMS']) {
+            if (!names.includes(name)) throw new Error(`Missing ${name}`);
+          }
+          for (const pattern of [/_aarch64\.dmg$/, /_x64\.dmg$/, /-setup\.exe$/, /\.msi$/, /\.AppImage$/, /\.deb$/]) {
+            if (!names.some(name => pattern.test(name))) throw new Error(`Missing desktop asset matching ${pattern}`);
+          }
+          if (assets.some(asset => asset.size <= 0 || asset.state !== 'uploaded')) throw new Error('Empty or incomplete release asset');
+          NODE
+
+      - name: Verify uploaded archives and checksum every release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir verified
+          gh release download "$PREVIEW_TAG" --repo "$GITHUB_REPOSITORY" --dir verified --pattern '*-web.zip' --pattern '*-source.zip' --pattern build-metadata.json --pattern SHA256SUMS
+          (cd verified && sha256sum -c SHA256SUMS)
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { createHash } from 'node:crypto';
+          import { execFileSync } from 'node:child_process';
+          const hashFile = async file => {
+            const hash = createHash('sha256');
+            for await (const chunk of fs.createReadStream(file)) hash.update(chunk);
+            return hash.digest('hex');
+          };
+          const metadata = JSON.parse(fs.readFileSync('verified/build-metadata.json', 'utf8'));
+          if (metadata.sourceSha !== process.env.GITHUB_SHA || metadata.version !== process.env.PREVIEW_VERSION) throw new Error('Uploaded provenance mismatch');
+          const release = JSON.parse(fs.readFileSync('release.json', 'utf8'));
+          const checksummedAssets = [];
+          fs.mkdirSync('hashed-assets', { recursive: true });
+          for (const asset of release.assets.filter(asset => !['preview-validation.json', 'RELEASE-SHA256SUMS'].includes(asset.name))) {
+            if (path.basename(asset.name) !== asset.name || /[\r\n\\]/.test(asset.name)) throw new Error('Unsafe release asset name');
+            let digest = /^sha256:([a-f0-9]{64})$/.exec(asset.digest ?? '')?.[1];
+            let hashSource = 'github-asset-digest';
+            if (!digest) {
+              const file = path.join('hashed-assets', asset.name);
+              const descriptor = fs.openSync(file, 'w');
+              try {
+                execFileSync('gh', ['api', '-H', 'Accept: application/octet-stream', `repos/${process.env.GITHUB_REPOSITORY}/releases/assets/${asset.id}`], { stdio: ['ignore', descriptor, 'inherit'] });
+              } finally {
+                fs.closeSync(descriptor);
+              }
+              if (fs.statSync(file).size !== asset.size) throw new Error(`Downloaded size mismatch: ${asset.name}`);
+              digest = await hashFile(file);
+              hashSource = 'downloaded-and-hashed';
+            }
+            checksummedAssets.push({ name: asset.name, size: asset.size, sha256: digest, hashSource });
+          }
+          const receipt = {
+            sourceSha: process.env.GITHUB_SHA,
+            contributionSha: process.env.CONTRIBUTION_SHA,
+            tag: process.env.PREVIEW_TAG,
+            version: process.env.PREVIEW_VERSION,
+            pageUrl: process.env.PAGE_URL,
+            runUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+            runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+            jobs: Object.fromEntries(Object.entries(JSON.parse(process.env.JOB_RESULTS)).map(([name, data]) => [name, data.result])),
+            webAndSourceChecksumVerification: 'passed',
+            desktopAssets: checksummedAssets.filter(asset => /\.(dmg|exe|msi|AppImage|deb|rpm)$/.test(asset.name)),
+            allAssetChecksums: checksummedAssets,
+          };
+          fs.writeFileSync('preview-validation.json', JSON.stringify(receipt, null, 2) + '\n');
+          const lines = checksummedAssets.sort((a, b) => a.name.localeCompare(b.name)).map(asset => `${asset.sha256}  ${asset.name}`);
+          lines.push(`${await hashFile('preview-validation.json')}  preview-validation.json`);
+          fs.writeFileSync('RELEASE-SHA256SUMS', lines.join('\n') + '\n');
+          NODE
+          gh release upload "$PREVIEW_TAG" preview-validation.json RELEASE-SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Publish the complete prerelease and verify its source
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release edit "$PREVIEW_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq '(.draft == false) and .prerelease' | grep -qx true
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$PREVIEW_TAG" --jq .sha)" = "$GITHUB_SHA"
+          {
+            echo "Source: \`$GITHUB_SHA\`"
+            echo "Contribution: \`$CONTRIBUTION_SHA\`"
+            echo "Preview: $PAGE_URL"
+            echo "Prerelease: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$PREVIEW_TAG"
+          } >> "$GITHUB_STEP_SUMMARY"
