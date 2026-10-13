@@ -1,6 +1,6 @@
 [package]
 name = "gitube"
-version = "0.3.0-preview.1"
+version = "0.3.0-preview.2"
 description = "Gitube：像刷 B 站 / YouTube 一样刷 GitHub 开源项目"
 authors = ["Andy7016"]
 license = "MIT"

@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Gitube",
-  "version": "0.3.0-preview.1",
+  "version": "0.3.0-preview.2",
   "identifier": "io.github.andy7016.gitube",
   "build": {
     "frontendDist": "../dist",
@@ -44,7 +44,7 @@
     },
     "windows": {
       "wix": {
-        "version": "0.3.0.1"
+        "version": "0.3.0.2"
       }
     }
   }

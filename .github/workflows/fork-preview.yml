@@ -1,7 +1,7 @@
 # Fork-only preview. Never run or publish from the upstream repository.
 # Push the preview branch, not the tag: GITHUB_TOKEN creates the tag below so
 # the original release.yml tag trigger does not start a separate release.
-name: Fork recommendation controls preview
+name: Fork frontend graph preview
 
 on:
   push:
@@ -16,9 +16,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  PREVIEW_VERSION: 0.3.0-preview.1
-  PREVIEW_TAG: v0.3.0-preview.1
-  CONTRIBUTION_SHA: d16239b79fbcb44e7b7b40f48b78f0b5b9944c2f
+  PREVIEW_VERSION: 0.3.0-preview.2
+  PREVIEW_TAG: v0.3.0-preview.2
+  CONTRIBUTION_SHA: 165f6f7933fe1f4716ea9fa7bedb9857fe6c7670
 
 jobs:
   prepare:
@@ -55,7 +55,7 @@ jobs:
           const versions = [pkg.version, lock.version, lock.packages[''].version, tauri.version, cargo, cargoLock];
           if (versions.some(value => value !== version)) throw new Error(`Version mismatch: ${versions}`);
           if (process.env.PREVIEW_TAG !== `v${version}`) throw new Error('Tag/version mismatch');
-          if (tauri.bundle.windows?.wix?.version !== '0.3.0.1') throw new Error('Expected numeric MSI version 0.3.0.1');
+          if (tauri.bundle.windows?.wix?.version !== '0.3.0.2') throw new Error('Expected numeric MSI version 0.3.0.2');
           NODE
 
       - name: Create or resume one unpublished prerelease at the exact source SHA
@@ -74,7 +74,7 @@ jobs:
 
           if ! gh release view "$PREVIEW_TAG" --repo "$GITHUB_REPOSITORY" --json databaseId > release-id.json 2>/dev/null; then
             cat > release-notes.md <<EOF
-          Fork preview of the recommendation controls contribution: per-person following weights, foreground reading signals, and normal / explore / random recommendation modes with session feed resume.
+          Fork preview adding the browser-only technology provenance graph to following weights, foreground reading, exploration modes, and feed resume. README evidence, explicit GitHub dependencies, bounded people-related projects, manual expansion, and resumable graph workspaces share the same web/desktop frontend.
 
           - Source commit: $GITHUB_SHA
           - Accepted contribution: $CONTRIBUTION_SHA
@@ -82,9 +82,9 @@ jobs:
           - Web preview: https://vvcchh0.github.io/Gitube/
           - Source and web archives include SHA-256 checksums and build metadata.
 
-          Validation before this preview: 40 local automated tests and isolated browser checks passed. This workflow runs npm ci, npm test, npm run build, Pages deployment, and macOS ARM / macOS Intel / Windows / Linux native bundles at the source SHA above. The release is published only after all these jobs succeed and the web/source archive checksums are verified.
+          Validation before this preview: local automated tests, TypeScript/build checks, and isolated graph browser acceptance passed; see docs/acceptance in the source archive for exact coverage and limitations. This workflow runs npm ci, npm test, npm run build, Pages deployment, and macOS ARM / macOS Intel / Windows / Linux native bundles at the source SHA above. The release is published only after all these jobs succeed and the web/source archive checksums are verified.
 
-          Manual acceptance: try all three recommendation modes and return to each feed; adjust one following weight to 0 and restore it; confirm reading only counts while the detail page is visible and focused; inspect responsive light/dark views. A real GitHub account flow and local native installation have not yet been tested. These are unsigned preview installers; the source project remains serverless and stores login/recommendation data on the user's device.
+          Manual acceptance: open the technology graph, analyze a public repository, inspect evidence and technical arrow direction, expand a node, and return to the cached workspace. Try light/dark and mobile views. Confirm the recommendation modes and return-to-feed behavior still work. A real GitHub account flow and local native installation have not yet been tested. These are unsigned preview installers; the source project remains serverless and stores login/recommendation data on the user's device.
           EOF
             gh release create "$PREVIEW_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --target "$GITHUB_SHA" --draft --prerelease --title "Gitube $PREVIEW_TAG (fork preview)" --notes-file release-notes.md
             gh release view "$PREVIEW_TAG" --repo "$GITHUB_REPOSITORY" --json databaseId > release-id.json
@@ -237,8 +237,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           releaseId: ${{ needs.prepare.outputs.release_id }}
-          tagName: v0.3.0-preview.1
-          releaseName: Gitube v0.3.0-preview.1 (fork preview)
+          tagName: v0.3.0-preview.2
+          releaseName: Gitube v0.3.0-preview.2 (fork preview)
           releaseDraft: true
           prerelease: true
           args: ${{ matrix.args }}
